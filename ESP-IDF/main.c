@@ -1,4 +1,3 @@
-
 #include "Arduino.h"
 #undef INADDR_NONE  
 #include <stdio.h>
@@ -9,6 +8,10 @@
 #include <AES.h>
 #include <Ed25519.h>
 #include <SHA256.h>
+
+
+// using OpenDroneID library
+#include <opendroneid.h>
 
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -35,6 +38,9 @@
 #include <aes.c>
 #include "KeccakP-1600-inplace32BI.c"
 
+#include <inttypes.h>  // Include this at the top of the file
+
+
 unsigned long dripLinkCreationTime;// Global variable to store DRIP Link creation time
 
 unsigned long HDATime;
@@ -49,8 +55,8 @@ uint8_t parentDETArray[16];
 uint8_t childDETArray[16];
 
 // Wi-Fi Credentials
-const char* ssid = "Khanfar";
-const char* password = "khalid123";
+const char* ssid = "TELUS9379";
+const char* password = "FRxkhF5MJn35";
 String serverName = "https://vertexpal.com/Drone/";  // Update with your local IP and endpoint
 
 // NTP Server Settings
@@ -72,6 +78,7 @@ bool deviceConnected = false;
 
 bool wrapperCreated = false;
 
+
  int loops = -1; 
 
  // Advertising Data
@@ -92,6 +99,8 @@ std:: string ParentDET;
 uint8_t signature[64];
 uint8_t parentSignature[64];
 std::vector<uint8_t> wrapper;
+std::vector<uint8_t> astmPayload;
+std::vector<uint8_t> fullPayload;
 std::vector<uint8_t> dripLink;
 unsigned long lastTransmissionTime = 0;  // To manage timed transmissions
 const unsigned long transmissionInterval = 5000;  // 5 seconds
@@ -99,19 +108,28 @@ const unsigned long transmissionInterval = 5000;  // 5 seconds
 std::string toBinary(unsigned int value, int bits) {
     return std::bitset<64>(value).to_string().substr(64 - bits, bits);  // Convert and trim to required bits
 }
-
-// Helper function to insert 32-bit Unix timestamp into a vector (little-endian format)
+// Function to insert a timestamp into a vector (ensuring little-endian format)
 void insertUnixTimestamp(std::vector<uint8_t>& vec, uint32_t timestamp) {
+   // Serial.printf("Inserting Timestamp: %u (Hex: 0x%08X)\n", timestamp, timestamp);
     for (int i = 0; i < 4; i++) {
-        vec.push_back((uint8_t)(timestamp >> (8 * i)));  // Little-endian order
+        vec.push_back((uint8_t)(timestamp >> (8 * i)));  // Store in little-endian order
     }
 }
 
-
-
+// Function to get the current timestamp as a Unix epoch time
 uint32_t getCurrentUnixTimestamp() {
+    struct tm timeInfo;
     time_t now;
-    time(&now);  // Get the current time in seconds since the epoch
+    time(&now);
+    
+    if (getLocalTime(&timeInfo)) {
+        Serial.printf("Current Time (UTC): %04d-%02d-%02d %02d:%02d:%02d\n",
+                      timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday,
+                      timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
+    } else {
+        Serial.println("Failed to get local time, using raw Unix time.");
+    }
+    
     return static_cast<uint32_t>(now);
 }
 
@@ -160,20 +178,39 @@ bool isBLEControllerActive() {
     return (status == ESP_BT_CONTROLLER_STATUS_ENABLED);
 }
 
-void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t wrapperSize) {
+
+void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t wrapperSize, bool isLink) {
+
+    fullPayload.clear();
     // Base advertising data (constant part)
     uint8_t baseAdvData[] = {
-        0x02, 0x01, 0x06,             // Flags
-        0x0D, 0x09, 'E', 'X', 'T', '_', 'B', 'L', 'E', '_', 'T', 'E', 'S', 'T', // Name
-        0x02, 0x0a, 0xeb,            // TX Power Level
+        //0x02, 0x01, 0x06,
+       /* 0x11, 0x07, 
+        0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, // UUID (Little-endian)
+        0x00, 0x10, 0x00, 0x00, 0xFA, 0xFF, 0x00, 0x00,*/
+            // Flags
+      //  0x0D, 0x09, 'E', 'X', 'T', '_', 'B', 'L', 'E', '_', 'T', 'E', 'S', 'T', // Name
+        //0x02, 0x0a, 0xeb,            // TX Power Level
+    };
+
+      // Length and type for service data
+    uint8_t serviceDataHeader[] = {
+        static_cast<uint8_t>(2 + 1 + newWrapperData.size()), // Length: UUID (16) + Opcode (1) + F3411 Size
+        0x16,
+
+        0xFA, 0xFF   // UUID: ASTM Remote ID (0xFFFA)                                               
     };
 
     // Calculate the dynamic flag based on the wrapper size
-    uint8_t dynamicFlag = static_cast<uint8_t>(wrapperSize & 0xFF) + 3;
+    //uint8_t dynamicFlag = static_cast<uint8_t>(wrapperSize & 0xFF) + 3;
+    //::astmPayload.clear();
 
-    // Total size of the advertising data
-    size_t totalSize = sizeof(baseAdvData) + 2 + wrapperSize; // +2 for dynamicFlag and 0xFF
+    
+     // Calculate total advertising size
+    size_t totalSize = sizeof(baseAdvData) + sizeof(serviceDataHeader) + 1 + newWrapperData.size();
 
+    ESP_LOGE(LOG_TAG, "ASTM  data size  %zu bytes", newWrapperData.size());
+    wrapperCreated = true;
     // Ensure the size does not exceed BLE advertising limits
     if (totalSize > 255) {
         ESP_LOGE(LOG_TAG, "Advertising data size exceeds BLE limit: %zu bytes", totalSize);
@@ -182,29 +219,27 @@ void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t
 
     // Print wrapper size for debugging
     ESP_LOGI(LOG_TAG, "Wrapper Size: %zu bytes", wrapperSize);
+    static uint8_t messageCounter = 0;
+      
+    ::fullPayload.reserve(totalSize);
 
-    // Clear and update the global wrapper
-    ::wrapper.clear();
-    ::wrapper.reserve(totalSize);
-
-    // Add base advertising data
-    ::wrapper.insert(::wrapper.end(), baseAdvData, baseAdvData + sizeof(baseAdvData));
-
-    // Add the dynamic flag
-    ::wrapper.push_back(dynamicFlag);
-
-    // Add 0xFF after the dynamic flag
-    ::wrapper.push_back(0xFF);
-    ::wrapper.push_back(0xFF);
-    ::wrapper.push_back(0xFF);
-
+            // Add base advertising data
+   // ::fullPayload.insert(::fullPayload.end(), baseAdvData, baseAdvData + sizeof(baseAdvData));
+    ::fullPayload.insert(::fullPayload.end(), serviceDataHeader, serviceDataHeader + sizeof(serviceDataHeader));
+    fullPayload.push_back(0x0D);
+    fullPayload.push_back(messageCounter);  // Counter (1 byte)
+    messageCounter = (messageCounter + 1) % 256;  // Increment and wrap at 255
+    
+    /* if(isLink){
+      wrapper.push_back(0x01);
+     }else{
+        wrapper.push_back(0x02);
+     }*/
     // Add the wrapper data
-    ::wrapper.insert(::wrapper.end(), newWrapperData.begin(), newWrapperData.end());
-
-
+    ::fullPayload.insert(::fullPayload.end(), newWrapperData.begin(), newWrapperData.end());
 
     if(isBLEControllerActive()){
-    esp_err_t err = esp_ble_gap_config_ext_adv_data_raw(0, newWrapperData.size(), newWrapperData.data());
+    esp_err_t err = esp_ble_gap_config_ext_adv_data_raw(0,fullPayload.size(), fullPayload.data());
           ESP_LOGI(LOG_TAG, "Updated Avertise Successed :");
     }
 
@@ -212,11 +247,11 @@ void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t
 
     // Log updated advertising data
     ESP_LOGI(LOG_TAG, "Updated Advertising Data:");
-    for (size_t i = 0; i < ::wrapper.size(); i++) {
-        ESP_LOGI(LOG_TAG, "0x%02X", ::wrapper[i]);
+    for (size_t i = 0; i < ::fullPayload.size(); i++) {
+        ESP_LOGI(LOG_TAG, "0x%02X", ::fullPayload[i]);
     }
 
-    wrapperCreated = true;
+   
 }
 
 
@@ -232,8 +267,6 @@ void printVectorHex(const std::vector<uint8_t>& vec, const char* label) {
     }
     Serial.println();
 }
-
-
 
 // Key variables for private and public key
 // Static Private Key (32 bytes)
@@ -282,6 +315,8 @@ void cshake128(const uint8_t *input, size_t inputLen, const uint8_t *customizati
     // Extract the output (only need 8 bytes for the 64-bit hash)
     KeccakP1600_ExtractBytes(&keccakState, output, 0, outputLen);
 }
+
+
 
 std:: string det_orchid( unsigned int hda,  unsigned int raa,  unsigned int ipv6, unsigned int suitid, uint8_t publicKey[32], bool isParent){
   std::string b_prefix = toBinary(ipv6, 28);
@@ -682,60 +717,6 @@ if (getFromCache("parent_sig", parentSignature, sizeof(parentSignature)) &&
 
 
 
-std::vector<uint8_t> createWrapper(
-    const std::vector<uint8_t> &payload, const uint8_t *det) {
-
-    unsigned long startWrapper = millis();
-    wrapper.clear(); // Clear existing wrapper data
-
-      // Get the current Unix timestamps
-    uint32_t validNotBefore = getCurrentUnixTimestamp();  // Now
-    
-    wrapper.insert(wrapper.end(), (uint8_t*)&validNotBefore, (uint8_t*)&validNotBefore + 4);
-    
-    uint32_t validNotAfter = validNotBefore + 300;  // Valid for 5 minutes
-
-    wrapper.insert(wrapper.end(), (uint8_t*)&validNotAfter, (uint8_t*)&validNotAfter + 4);
-
-    // Add payload (F3411 messages, 25–100 bytes)
-    wrapper.insert(wrapper.end(), payload.begin(), payload.end());
-
-    // Add DET
-    wrapper.insert(wrapper.end(), det, det + 16);
-
-    printVectorHex(wrapper, "WRAPPER BEFORE SIGNING : ");
-
-    // Sign the wrapper
-   
-    Ed25519::sign(signature, privateKey, publicKey, wrapper.data(), wrapper.size());
-
-// test
-    Ed25519::sign(test_signature, privateKey, publicKey, test_message, sizeof(test_message));
-
-    // Add signature to the wrapper
-    wrapper.insert(wrapper.end(), signature, signature + 64);
-      unsigned long endWrapper = millis();
-      wrapperCreationTime = endWrapper - startWrapper;
-    
-
-    if(loops == -1){
-      sendToServer(true);
-      
-      sendToServer(false);
-      loops++;
-    }
-
-
-  
-      
-  
-      
- 
-
-
-    return wrapper;
-}
-
 
 void generateKeys(){
   //Ed25519::generatePrivateKey(privateKey);
@@ -823,17 +804,347 @@ void sendDripLink() {
 
      float direction = 90.0;
 // Function to generate F3411 data (example values)
-std::vector<uint8_t> generateF3411Message() {
 
+
+#define F3411_MSG_PACK_HEADER 0x0F
+#define F3411_BASIC_ID 0x00
+#define F3411_LOCATION 0x01
+#define F3411_AUTH 0x02
+#define F3411_SYSTEM 0x04
+
+
+/*
+
+
+
+
+Message Counter 
+Message Type Version 
+Message pack (0xF){
+    Message length --> Dynamic basid on what data we have, BASIC ID + Location + Authentication + System 
+    Message count --> Constant 0x8
+    Basic ID  0x0
+    Location 0x1
+    Authentication 0x2 
+    System 0x4
+}
+
+
+
+
+
+
+
+*/
+
+std::vector<uint8_t> createWrapper(const uint8_t *det) {
+
+    unsigned long startWrapper = millis();
+    wrapper.clear(); // Clear existing wrapper data
+      // Get the current Unix timestamps
+    uint32_t validNotBefore = getCurrentUnixTimestamp();  // Now
+    
+    wrapper.insert(wrapper.end(), (uint8_t*)&validNotBefore, (uint8_t*)&validNotBefore + 4);
+    
+    uint32_t validNotAfter = validNotBefore + 300;  // Valid for 5 minutes
+
+    wrapper.insert(wrapper.end(), (uint8_t*)&validNotAfter, (uint8_t*)&validNotAfter + 4);
+
+    // Add payload (F3411 messages, 25–100 bytes)
+    //wrapper.insert(wrapper.end(), payload.begin(), payload.end());
+    // Add DET
+    wrapper.insert(wrapper.end(), det, det + 16);
+
+    printVectorHex(wrapper, "WRAPPER BEFORE SIGNING : ");
+
+    // Sign the wrapper
+   
+    Ed25519::sign(signature, privateKey, publicKey, wrapper.data(), wrapper.size());
+
+// test
+    Ed25519::sign(test_signature, privateKey, publicKey, test_message, sizeof(test_message));
+
+    // Add signature to the wrapper
+    wrapper.insert(wrapper.end(), signature, signature + 64);
+      unsigned long endWrapper = millis();
+      wrapperCreationTime = endWrapper - startWrapper;
+    
+
+    if(loops == -1){
+      sendToServer(true);
+      
+      sendToServer(false);
+      loops++;
+    }
+
+
+  
+      
+  
+      
+ 
+
+
+    return wrapper;
+}
+ std::vector<uint8_t>  defineWrapper (){
+        unsigned long startDET = millis();
+       childDET =  det_orchid (det.hda, det.raa, det.prefix, det.suiteID, publicKey,false);
+        // Convert std::string DETs to uint8_t arrays
+        unsigned long endDET = millis();
+        detGenerationTime = endDET - startDET;
+        uint8_t childDETArray[16];
+        hexStringToByteArray(childDET, childDETArray, sizeof(childDETArray));
+       //std::vector<uint8_t> payload = createPayload();
+         // Create Wrapper
+        std::vector<uint8_t> wrapper = createWrapper( childDETArray);
+        return wrapper; 
+        //
+        
+
+}
+std::vector<uint8_t> initWrapper(){
+
+    // Setup the constat values. :
+    det.prefix = 0x2001003; 
+    det.raa = 16376; 
+    det.hda = 1025;
+    det.suiteID = 5; 
+   std::vector<uint8_t> wrapper =  defineWrapper();
+   return wrapper;
+}
+
+// ASTM F3411 Message Structures
+ODID_BasicID_data basicID;
+ODID_Location_data location;
+ODID_Auth_data auth;
+ODID_System_data systemData;
+ODID_MessagePack_data messagePack;
+
+
+
+std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wrapper) {
+    size_t totalDataSize = wrapper.size();  // 88 bytes
+    size_t firstPageSize = 17;              // First page has 17 bytes
+    size_t remainingPageSize = 23;          // Subsequent pages take 23 bytes each
+
+    // Calculate the total number of required pages
+    size_t totalPages = 1 + (totalDataSize - firstPageSize + remainingPageSize - 1) / remainingPageSize;
+
+    std::vector<ODID_Auth_data> authMessages(totalPages);
+
+    Serial.printf("Total Auth Pages Before Encoding: %d\n", totalPages); // Debugging
+
+   /* if (totalDataSize != 88) {
+        Serial.println("Error: Wrapper size must be exactly 88 bytes.");
+        return {};
+    }*/
+
+    // --- First Auth Page ---
+    memset(&authMessages[0], 0, sizeof(ODID_Auth_data));
+    authMessages[0].AuthType = ODID_AUTH_SPECIFIC_AUTHENTICATION;
+    authMessages[0].DataPage = 0;
+    authMessages[0].LastPageIndex = totalPages - 1;
+    authMessages[0].Length = totalDataSize;
+    authMessages[0].Timestamp = (uint32_t)time(NULL);
+
+    memcpy(authMessages[0].AuthData, wrapper.data(), firstPageSize);
+
+    // --- Remaining Pages ---
+    for (size_t i = 1; i < totalPages; i++) {
+        memset(&authMessages[i], 0, sizeof(ODID_Auth_data));
+        authMessages[i].AuthType = ODID_AUTH_SPECIFIC_AUTHENTICATION;
+        authMessages[i].DataPage = i;
+        //authMessages[i].LastPageIndex = totalPages - 1;
+        //authMessages[i].Length = totalDataSize;
+        //authMessages[i].Timestamp = authMessages[0].Timestamp;
+
+        size_t offset = firstPageSize + (i - 1) * remainingPageSize;
+        size_t bytesToCopy = std::min(remainingPageSize, totalDataSize - offset);
+
+        memcpy(authMessages[i].AuthData, wrapper.data() + offset, bytesToCopy);
+    }
+
+    return authMessages;
+}
+
+/*std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wrapper) {
+    size_t totalDataSize = wrapper.size();  // 88 bytes
+    size_t firstPageSize = 17;              // First page has 17 bytes
+    size_t remainingPageSize = 23;          // Subsequent pages take 23 bytes each
+
+    // Calculate the total number of required pages
+    size_t totalPages = 1 + (totalDataSize - firstPageSize + remainingPageSize - 1) / remainingPageSize;
+
+    std::vector<ODID_Auth_data> authMessages(totalPages);
+
+    Serial.printf("Total Auth Pages Before Encoding: %d\n", totalPages); // Debugging
+
+    if (totalDataSize != 88) {
+        Serial.println("Error: Wrapper size must be exactly 88 bytes.");
+        return {};
+    }
+
+    // --- First Auth Page ---
+    memset(&authMessages[0], 0, sizeof(ODID_Auth_data));
+    authMessages[0].AuthType = ODID_AUTH_SPECIFIC_AUTHENTICATION;
+    authMessages[0].DataPage = 0;
+    authMessages[0].LastPageIndex = totalPages - 1;
+    authMessages[0].Length = totalDataSize;
+    authMessages[0].Timestamp = (uint32_t)time(NULL);
+
+    memcpy(authMessages[0].AuthData, wrapper.data(), firstPageSize);
+
+    // --- Remaining Pages ---
+    for (size_t i = 1; i < totalPages; i++) {
+        memset(&authMessages[i], 0, sizeof(ODID_Auth_data));
+        authMessages[i].AuthType = ODID_AUTH_SPECIFIC_AUTHENTICATION;
+        authMessages[i].DataPage = i;
+        authMessages[i].LastPageIndex = totalPages - 1;
+        authMessages[i].Length = totalDataSize;
+        authMessages[i].Timestamp = authMessages[0].Timestamp;
+
+        size_t offset = firstPageSize + (i - 1) * remainingPageSize;
+        size_t bytesToCopy = std::min(remainingPageSize, totalDataSize - offset);
+
+        memcpy(authMessages[i].AuthData, wrapper.data() + offset, bytesToCopy);
+    }
+
+    return authMessages;
+}*/
+
+
+
+
+
+
+
+    std::vector<uint8_t> constructASTMMessages( bool isWrapper) {
+  
+    std::vector<uint8_t> wrapper = initWrapper();
+    if (wrapper.size() != 88) {
+        Serial.println("Error: Wrapper size is not 88 bytes!");
+        return {};
+    }
+
+    ODID_MessagePack_encoded messagePack;
+    memset(&messagePack, 0, sizeof(messagePack));  // Clear structure
+    messagePack.ProtoVersion = 2;  // Set Protocol Version 2
+    messagePack.MessageType = ODID_MESSAGETYPE_PACKED; // Ensure this is the correct packed message type
+  
+
+    if(isWrapper){
+    messagePack.MsgPackSize = 8;// Total of 8 messages (Basic ID, Location, Authentication, System)
+}else {
+    messagePack.MsgPackSize = 8;
+}
+   messagePack.SingleMessageSize = ODID_MESSAGE_SIZE;  // 25 bytes (0x19 in hex)
+
+    // --- Basic ID Message ---
+    ODID_BasicID_data basicID;
+    memset(&basicID, 0, sizeof(basicID));
+    basicID.IDType = ODID_IDTYPE_SPECIFIC_SESSION_ID;  // Type 4 for Serial Number (DET)
+    strcpy(basicID.UASID, childDET.c_str());   // DET as Serial Number
+
+    // --- Location Message ---
+    ODID_Location_data location;
+    memset(&location, 0, sizeof(location));
+    location.Latitude = 42.2917000;  // Example Lat
+    location.Longitude = -85.587200; // Example Lon
+    location.AltitudeBaro = 100;      // Example Altitude
+    location.TimeStamp = (uint32_t)time(NULL);
+
+    //-- Authentication Message (Wrapper split into 5 pages) ---
+    std::vector<ODID_Auth_data> authMessages ;
+    if(isWrapper == true){
+     authMessages = constructAuthMessages(wrapper);
+}else {
+     authMessages = constructAuthMessages(dripLink);
+     ESP_LOGI(LOG_TAG, "Size of drip: %zu bytes\n", dripLink.size());
+
+}
+    // --- System Message ---
+    ODID_System_data system;
+    memset(&system, 0, sizeof(system));
+    system.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_FIXED;
+    system.OperatorLatitude = location.Latitude;
+    system.OperatorLongitude = location.Longitude;
+    system.Timestamp = (uint32_t)time(NULL);
+    
+
+    // --- Encoding the Messages ---
+    encodeBasicIDMessage(&messagePack.Messages[0].basicId, &basicID);
+    encodeLocationMessage(&messagePack.Messages[1].location, &location);
+
+    // Add the 5/7 authentication messages
+    int messages = 0; 
+   for (int i = 0; i < authMessages.size(); i++) {
+        encodeAuthMessage(&messagePack.Messages[i + 2].auth, &authMessages[i]);
+        messages = i;
+    }
+
+    encodeSystemMessage(&messagePack.Messages[messages+3].system, &system);
+
+    // Convert to byte array
+
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: %zu bytes\n", sizeof(messagePack.Messages[0].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data Page 1: %zu bytes\n", sizeof(messagePack.Messages[1].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data Page2 : %zu bytes\n", sizeof(messagePack.Messages[2].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: Page 3 %zu bytes\n", sizeof(messagePack.Messages[3].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: Page 4 %zu bytes\n", sizeof(messagePack.Messages[4].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: Page 5 %zu bytes\n", sizeof(messagePack.Messages[5].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: Page 6 %zu bytes\n", sizeof(messagePack.Messages[6].auth));
+    ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: Page 7 %zu bytes\n", sizeof(messagePack.Messages[7].auth));
+
+    ESP_LOGI(LOG_TAG, "Size of location: %zu bytes\n", sizeof(messagePack.Messages[0].location));
+    ESP_LOGI(LOG_TAG, "Size of system_data: %zu bytes\n", sizeof(messagePack.Messages[0].system));
+    ESP_LOGI(LOG_TAG, "Size of basic_data: %zu bytes\n", sizeof(messagePack.Messages[0].basicId));
+    ESP_LOGI(LOG_TAG, "Size of ASTM: %zu bytes\n", sizeof(messagePack));
+    
+    astmPayload.clear();   
+    astmPayload.insert(astmPayload.end(), (uint8_t*)&messagePack, (uint8_t*)&messagePack + sizeof(messagePack));
+    ESP_LOGI(LOG_TAG, "Size of ASTM: %zu bytes\n", astmPayload.size());
+
+    updateAdvDataWithWrapper(astmPayload, astmPayload.size(), false);
+    return astmPayload;
+}
+
+
+/*std::vector<uint8_t> generateF3411Message() {
+    std::vector<uint8_t> f3411Message;
+    static uint16_t msgCounter = 1;  // 2-byte counter
+
+    // Message Counter (2 bytes, little-endian) --> 1 byte , if it reaches to FF then it would go back to 0. (256). to Keep track of the messages we are receving. 
+
+    f3411Message.push_back(msgCounter & 0xFF);
+    f3411Message.push_back((msgCounter >> 8) & 0xFF);
+    msgCounter = (msgCounter + 1) % 65536;
+     // --- Header Section ---
+    // Protocol Version  -- > 
+    f3411Message.push_back(0xF2); 
+    // --- Message Pack (0x0F) ---
+    //f3411Message.push_back(0x0F);  // Message Pack Header
+     // Temporary buffer for pack content
+    std::vector<uint8_t> packContent;
+    uint8_t messageCount = 0; // up to 9. (max is 0)
+     // --- Basic ID Message ---
+    packContent.push_back(0x02); // Message type protocl version  
+    packContent.push_back(0x40); //  ID Type and the UA TYPE
+    //packContent.push_back(0x00); 
+    const char* serial = "DRONE1234"; // for DET push the byte 0x1 then push byetes of DET then padding with 6 null bytes, first 3 bytes for null padding of the UAS ID FIELD AND LAST 3 bytes for reserved filed basic ID message 
+    uint8_t idLength = 1 + strlen(serial);  // ID Type + Serial
+    packContent.push_back(idLength);
+    packContent.push_back(0x01);  // Serial Number ID Type
+    packContent.insert(packContent.end(), serial, serial + strlen(serial));
+    messageCount++;
+
+  // --- Location Message ---
+    packContent.push_back(0x012);  // Location message type  
     static float latitude = 42.2917000;  // Initial latitude
     static float longitude = -85.587200; // Initial longitude
     static uint16_t altitude = 100;      // Initial altitude
     static uint16_t velocity = 50;       // Velocity
     static float direction = 90.0;       // Direction in degrees
-
-    std::vector<uint8_t> f3411Message;
-
-
         // Convert velocity to distance covered in 1 second
     float distance = velocity * 1.0; // Assuming updates every 1 second
     //Convert distance to latitude/longitude changes
@@ -844,21 +1155,67 @@ std::vector<uint8_t> generateF3411Message() {
    
     latitude += deltaLatitude * cos(direction * M_PI / 180.0);
     longitude += deltaLongitude * sin(direction * M_PI / 180.0);
+    // Location data length: 4+4+2+2+4 = 16 bytes
+    packContent.push_back(16);  
 
+    // Latitude/Longitude (IEEE-754 floats)
+    uint8_t* latPtr = reinterpret_cast<uint8_t*>(&latitude);
+    uint8_t* lonPtr = reinterpret_cast<uint8_t*>(&longitude);
+    packContent.insert(packContent.end(), latPtr, latPtr + 4);
+    packContent.insert(packContent.end(), lonPtr, lonPtr + 4);
+     // Altitude (2 bytes little-endian)
+    packContent.push_back(altitude & 0xFF);
+    packContent.push_back((altitude >> 8) & 0xFF);
+    // Velocity (2 bytes little-endian)
+    packContent.push_back(velocity & 0xFF);
+    packContent.push_back((velocity >> 8) & 0xFF);
+
+    // Timestamp (4 bytes little-endian)
     uint32_t timestamp = getCurrentUnixTimestamp();
+    uint8_t* timePtr = reinterpret_cast<uint8_t*>(&timestamp);
+    packContent.insert(packContent.end(), timePtr, timePtr + 4);
+    messageCount++;
 
-    // Add data to F3411 message in little-endian format
-    f3411Message.insert(f3411Message.end(), (uint8_t *)&latitude, (uint8_t *)&latitude + sizeof(latitude));
-    f3411Message.insert(f3411Message.end(), (uint8_t *)&longitude, (uint8_t *)&longitude + sizeof(longitude));
-    f3411Message.insert(f3411Message.end(), (uint8_t *)&altitude, (uint8_t *)&altitude + sizeof(altitude));
-    f3411Message.insert(f3411Message.end(), (uint8_t *)&velocity, (uint8_t *)&velocity + sizeof(velocity));
-    f3411Message.insert(f3411Message.end(), (uint8_t *)&timestamp, (uint8_t *)&timestamp + sizeof(timestamp));
 
+    // here we need to constuct the wrapper under authentication, we can call the create wrapper and return the wrapper 
+    // --- Authentication Wrapper ---
+    packContent.push_back(0x02);
+    std::vector<uint8_t> wrapper = initWrapper();  
+    packContent.insert(packContent.end(), wrapper.begin(), wrapper.end());
+    messageCount++;  // Wrapper is treated as a single message
+
+
+   // --- System Message ---
+    packContent.push_back(0x04);  // System message type
+    packContent.push_back(4);     // System data length
+    packContent.push_back(0x01);  // Status flags
+    packContent.push_back(0x00);  // Reserved
+    packContent.push_back(0x00);  // Reserved
+    packContent.push_back(0x00);  // Reserved
+    messageCount++;
+
+     // --- Calculate Pack Length ---
+    uint16_t packLength = packContent.size() + 1;  // +1 for message count
+    f3411Message.push_back(packLength & 0xFF);
+    f3411Message.push_back((packLength >> 8) & 0xFF);
+
+     // Add Message Count
+    f3411Message.push_back(messageCount);
+
+
+    // Insert pack content
+    f3411Message.insert(f3411Message.end(), packContent.begin(), packContent.end());
+    
     return f3411Message;
-}
+}*/
+
+
+
+
+
 
 // Function to Create Payload (F3411 Messages)
-std::vector<uint8_t> createPayload() {
+/*std::vector<uint8_t> createPayload() {
     std::vector<uint8_t> payload;
     // Generate F3411 message
     std::vector<uint8_t> f3411Message = generateF3411Message();
@@ -868,23 +1225,9 @@ std::vector<uint8_t> createPayload() {
     printVectorHex(payload, "Payload (F3411 Messages)");
 
     return payload;
-}
+}*/
 
- void defineWrapper (){
-        unsigned long startDET = millis();
-       childDET =  det_orchid (det.hda, det.raa, det.prefix, det.suiteID, publicKey,false);
-        // Convert std::string DETs to uint8_t arrays
-        unsigned long endDET = millis();
-        detGenerationTime = endDET - startDET;
-        uint8_t childDETArray[16];
-        hexStringToByteArray(childDET, childDETArray, sizeof(childDETArray));
-       std::vector<uint8_t> payload = createPayload();
-         // Create Wrapper
-        std::vector<uint8_t> wrapper = createWrapper(payload, childDETArray);
-        updateAdvDataWithWrapper(wrapper, wrapper.size());
-        
 
-}
 
 void clear_nvs() {
     esp_err_t err = nvs_flash_erase();
@@ -942,15 +1285,6 @@ void performOTAUpdate(const char* firmwareUrl) {
 
 
 
-void initWrapper(){
-
-    // Setup the constat values. :
-    det.prefix = 0x2001003; 
-    det.raa = 16376; 
-    det.hda = 1025;
-    det.suiteID = 5; 
-    defineWrapper();
-}
 
 
 
@@ -1026,22 +1360,21 @@ void NVSInit(){
 
 
 
-void InitTime(){
-
-// Initialize time from NTP server
+void InitTime() {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-    // Wait for time to be set
+    
     struct tm timeInfo;
     if (!getLocalTime(&timeInfo)) {
-        Serial.println("Failed to obtain time");
+        Serial.println("Failed to obtain time from NTP");
         return;
     }
-
-    Serial.println("Time synchronized:");
-    Serial.println(&timeInfo, "%Y-%m-%d %H:%M:%S");
-
+    
+    Serial.print("Time synchronized: ");
+    Serial.printf("%04d-%02d-%02d %02d:%02d:%02d\n", 
+                  timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday,
+                  timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
 }
+
 
 
 
@@ -1084,9 +1417,9 @@ esp_ble_gap_ext_adv_params_t ext_adv_params_2M = {
   .peer_addr = {0, 0, 0, 0, 0, 0},
   .filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
   .tx_power = EXT_ADV_TX_PWR_NO_PREFERENCE,
-  .primary_phy = ESP_BLE_GAP_PHY_1M,
+  .primary_phy = ESP_BLE_GAP_PHY_CODED,
   .max_skip = 0,
-  .secondary_phy = ESP_BLE_GAP_PHY_2M,
+  .secondary_phy = ESP_BLE_GAP_PHY_CODED,
   .sid = 1,
   .scan_req_notif = false,
 };
@@ -1146,7 +1479,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             break;
         case ESP_GAP_BLE_EXT_ADV_SET_RAND_ADDR_COMPLETE_EVT:
             ESP_LOGI(LOG_TAG, "Random address set.");
-            esp_ble_gap_config_ext_adv_data_raw(0, wrapper.size(), wrapper.data());
+            esp_ble_gap_config_ext_adv_data_raw(0, fullPayload.size(), fullPayload.data());
             break;
 
         case ESP_GAP_BLE_EXT_ADV_DATA_SET_COMPLETE_EVT:
@@ -1180,8 +1513,11 @@ extern  "C" void app_main(void) {
     NVSInit();
     clear_nvs();
     WiFiInit(); 
+    InitTime();
     generateKeys();
-    initWrapper();
+    //initWrapper();
+    constructASTMMessages(true);
+    
 // Check for updates
     checkForUpdates();
 
@@ -1200,7 +1536,7 @@ extern  "C" void app_main(void) {
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-    ESP_LOGI(LOG_TAG, "Advertising Data Length: %d", wrapper.size());
+    //ESP_LOGI(LOG_TAG, "Advertising Data Length: %d", broadcastMessage.size());
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     esp_ble_gap_ext_adv_set_params(0, &ext_adv_params_2M);
 
@@ -1272,25 +1608,28 @@ if (valid) {
   std::string wrapperStdStr = WrapperSTR.c_str();
 
 
-  delay(500);
-
+ // delay(500);
+    //initWrapper();
+    //generateF3411Message();
+    constructASTMMessages(true);
+ 
     sendWrapperAndPublicKey();
-
     if (linkRec == true){
-      sendDripLink();
+     // sendDripLink();
+      //updateAdvDataWithWrapper(dripLink, dripLink.size(), true);
+      constructASTMMessages(false);
     }
 
     // Update and broadcast the wrapper
         
-            initWrapper();
+            
 
-           
-            esp_err_t ret = esp_ble_gap_config_ext_adv_data_raw(0, wrapper.size(), wrapper.data());
-if (ret == ESP_OK) {
+    //esp_err_t ret = esp_ble_gap_config_ext_adv_data_raw(0, fullPayload.size(), fullPayload.data());
+/*if (ret == ESP_OK) {
     printf("Advertising data updated successfully\n");
 } else {
     printf("Failed to update advertising data: %s\n", esp_err_to_name(ret));
-}
+}*/
     }
 
 
