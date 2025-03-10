@@ -58,7 +58,7 @@ Once installation is complete, you can use DRIP_2025 to broadcast and receive dr
    - Drone ID (e.g., a unique identifier or serial number).
    - Drone Location (latitude/longitude, altitude).
    - Speed and Heading (if available from the broadcast telemetry).
-   - Operator or Session ID (if the message includes the operator’s identity or session information). The app interface allows you to refresh the scan or view details of a selected drone. For example, tapping a drone entry might show a map with its location or additional info if available.
+   - Operator or Session ID (if the message includes the operator’s identity or session information). The app interface allows you to refresh the scan or view details of a selected drone. For example, tapping a drone in the map will show a drone general infromation with its location or additional info if available.
 
 
 
