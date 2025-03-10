@@ -4,7 +4,7 @@
 
 The project’s primary purpose is to demonstrate a working implementation of the Drone Remote ID Protocol and ensure compliance with industry standards for remote identification. Key functionalities include:
 
-  * **Broadcast Module** (Drone-Mounted) <ins>: Firmware that allows a drone (or attached device) to broadcast its ID and telemetry (location, altitude, etc.) using Bluetooth and Wi-Fi signals following standard Remote ID formats.
+  * **Broadcast Module** (Drone-Mounted) : Firmware that allows a drone (or attached device) to broadcast its ID and telemetry (location, altitude, etc.) using Bluetooth and Wi-Fi signals following standard Remote ID formats.
   
   * **Mobile Receiver App**: A Flutter-based mobile application that scans for nearby drones’ broadcast signals, decodes the Remote ID messages, and displays pertinent information (e.g., drone ID, position, operator info). This app acts as a receiver and user interface for the system
   
