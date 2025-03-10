@@ -4,7 +4,7 @@
 
 The project’s primary purpose is to demonstrate a working implementation of the Drone Remote ID Protocol and ensure compliance with industry standards for remote identification. Key functionalities include:
 
-  * **Broadcast Module** (Drone-Mounted) : Firmware that allows a drone (or attached device) to broadcast its ID and telemetry (location, altitude, etc.) using Bluetooth and Wi-Fi signals following standard Remote ID formats.
+  * **Broadcast Module** (Drone-Mounted) : Firmware that allows a drone (or attached device) to broadcast its ID and telemetry (location, altitude, etc.) using Bluetooth5 following standard Remote ID formats.
   
   * **Mobile Receiver App**: A Flutter-based mobile application that scans for nearby drones’ broadcast signals, decodes the Remote ID messages, and displays pertinent information (e.g., drone ID, position, operator info). This app acts as a receiver and user interface for the system
   
@@ -38,7 +38,7 @@ The firmware will automatically start broadcasting the drone’s Remote ID data 
 - Dependencies: Navigate to the Flutter/ directory and fetch dependencies:
   - `cd ../Flutter`
   - `flutter pub get`
-- Run the App: Connect your Android device via USB (or start an emulator), ensure it’s detected (flutter devices), then launch the app:
+- Run the App: Connect your Android device via USB , ensure it’s detected (flutter devices), then launch the app:
   - `flutter run` 
  <br>
 This will build and install the DRIP_2025 app on your device. Upon launching, grant any necessary permissions (location/Bluetooth) so the app can scan for Remote ID broadcasts. <br>
