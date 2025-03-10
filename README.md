@@ -44,5 +44,28 @@ The firmware will automatically start broadcasting the drone’s Remote ID data 
 This will build and install the DRIP_2025 app on your device. Upon launching, grant any necessary permissions (location/Bluetooth) so the app can scan for Remote ID broadcasts. <br>
 **Note:** The Flutter app uses device Bluetooth and Wi-Fi radios to receive drone ID broadcasts. Ensure your device supports Bluetooth 4.0+ (for BLE) and Wi-Fi if required by the standard.
 
+4. Server Application:
+   -  Before running the server, ensure it can connect to the database. Edit any configuration files or environment variables (eg., Localhost )
+   -  Import the mySQL into your phpMyAdmin to build the required tables.
+
+<br>
+   
+**Usage Guide** 
+Once installation is complete, you can use DRIP_2025 to broadcast and receive drone identification information:
+ - Broadcasting from Drone: Power on the ESP32 with the DRIP_2025 firmware (or attach it to a drone). It will automatically begin broadcasting Remote ID messages over Bluetooth and Wi-Fi. No user intervention is needed on the device; it continuously sends out the drone’s identification (including a unique ID, current location, altitude, velocity, and other required data) at the interval specified by the standard.
+
+ - Receiving on Mobile App: Open the DRIP_2025 Flutter app on your mobile device. The app will scan for any Remote ID signals in the vicinity. When a compliant drone broadcast is detected, it will be decoded and displayed in the app’s interface. You should see a list of nearby drones or broadcasts, each showing details such as:
+   - Drone ID (e.g., a unique identifier or serial number).
+   - Drone Location (latitude/longitude, altitude).
+   - Speed and Heading (if available from the broadcast telemetry).
+   - Operator or Session ID (if the message includes the operator’s identity or session information). The app interface allows you to refresh the scan or view details of a selected drone. For example, tapping a drone entry might show a map with its location or additional info if available.
 
 
+
+<br> 
+
+Please note that we will continue to devlope this code. 
+
+Ahmad K. Khanfar
+
+Western Michigan Unveristy 
