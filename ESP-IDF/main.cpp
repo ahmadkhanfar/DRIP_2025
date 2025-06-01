@@ -8,7 +8,11 @@
 #include <AES.h>
 #include <Ed25519.h>
 #include <SHA256.h>
+#include "driver/uart.h"
+#include "driver/gpio.h"
+// Other Files
 
+#include "monitoring.h"
 
 // using OpenDroneID library
 #include <opendroneid.h>
@@ -37,8 +41,93 @@
 
 #include <aes.c>
 #include "KeccakP-1600-inplace32BI.c"
+#include "c_library_v2/common/mavlink.h"
 
 #include <inttypes.h>  // Include this at the top of the file
+// NEW CODE 
+#define RX_PIN 5
+#define TX_PIN 4
+#define BAUD_RATE 921600
+#define UART_PORT_NUM UART_NUM_1
+#define UART_BUF_SIZE (1024)
+static const char* TAG = "MAVLINK";
+float current_lat = 0.0;
+float current_lon = 0.0;
+float current_alt = 0.0;
+bool has_gps_fix = false;
+static mavlink_message_t msg;
+static mavlink_status_t status;
+static uint32_t last_heartbeat_ms = 0;
+
+
+#include "esp_timer.h"
+
+
+
+// UART init
+void init_uart() {
+    const uart_config_t uart_config = {
+        .baud_rate = BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
+    uart_driver_install(UART_PORT_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_PORT_NUM, &uart_config);
+    uart_set_pin(UART_PORT_NUM, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+void handle_message(mavlink_message_t* msg) {
+    switch (msg->msgid) {
+        case MAVLINK_MSG_ID_HEARTBEAT: {
+            mavlink_heartbeat_t heartbeat;
+            mavlink_msg_heartbeat_decode(msg, &heartbeat);
+            ESP_LOGI(TAG, "HB | Type: %d", heartbeat.type);
+            break;
+        }
+        case MAVLINK_MSG_ID_SYS_STATUS: {
+            mavlink_sys_status_t sys_status;
+            mavlink_msg_sys_status_decode(msg, &sys_status);
+            ESP_LOGI(TAG, "Battery: %.2fV", sys_status.voltage_battery / 1000.0f);
+            break;
+        }
+        case MAVLINK_MSG_ID_GLOBAL_POSITION_INT: {
+            mavlink_global_position_int_t pos;
+            mavlink_msg_global_position_int_decode(msg, &pos);
+            current_lat = pos.lat / 1e7;
+            current_lon = pos.lon / 1e7;
+            current_alt = pos.alt / 1000.0;
+            has_gps_fix = true;
+            ESP_LOGI(TAG, "Lat: %.7f, Lon: %.7f, Alt: %.2f", current_lat, current_lon, current_alt);
+            break;
+        }
+
+        
+        default:
+            ESP_LOGI(TAG, "Unhandled ID: %d", msg->msgid);
+            break;
+    }
+}
+
+void mavlink_task(void *pvParameters) {
+    uint8_t data[UART_BUF_SIZE];
+    while (1) {
+        int len = uart_read_bytes(UART_PORT_NUM, data, UART_BUF_SIZE, pdMS_TO_TICKS(100));
+        for (int i = 0; i < len; i++) {
+            if (mavlink_parse_char(MAVLINK_COMM_0, data[i], &msg, &status)) {
+                last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                handle_message(&msg);
+            }
+        }
+
+        if ((xTaskGetTickCount() * portTICK_PERIOD_MS) - last_heartbeat_ms > 2000) {
+            ESP_LOGE(TAG, "ERROR: No MAVLink heartbeat!");
+            last_heartbeat_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        }
+    }
+}
+
 
 
 unsigned long dripLinkCreationTime;// Global variable to store DRIP Link creation time
@@ -55,8 +144,8 @@ uint8_t parentDETArray[16];
 uint8_t childDETArray[16];
 
 // Wi-Fi Credentials
-const char* ssid = "TELUS9379";
-const char* password = "FRxkhF5MJn35";
+const char* ssid = "Khanfar";
+const char* password = "khalid123";
 String serverName = "https://vertexpal.com/Drone/";  // Update with your local IP and endpoint
 
 // NTP Server Settings
@@ -179,8 +268,7 @@ bool isBLEControllerActive() {
 }
 
 
-void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t wrapperSize, bool isLink) {
-
+bool updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t wrapperSize, bool isLink) {
     fullPayload.clear();
     // Base advertising data (constant part)
     uint8_t baseAdvData[] = {
@@ -214,7 +302,7 @@ void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t
     // Ensure the size does not exceed BLE advertising limits
     if (totalSize > 255) {
         ESP_LOGE(LOG_TAG, "Advertising data size exceeds BLE limit: %zu bytes", totalSize);
-        return;
+        return false;
     }
 
     // Print wrapper size for debugging
@@ -243,14 +331,22 @@ void updateAdvDataWithWrapper(const std::vector<uint8_t>& newWrapperData, size_t
           ESP_LOGI(LOG_TAG, "Updated Avertise Successed :");
     }
 
+    
+
+
+
+
 
 
     // Log updated advertising data
-    ESP_LOGI(LOG_TAG, "Updated Advertising Data:");
+   /* ESP_LOGI(LOG_TAG, "Updated Advertising Data:");
     for (size_t i = 0; i < ::fullPayload.size(); i++) {
         ESP_LOGI(LOG_TAG, "0x%02X", ::fullPayload[i]);
-    }
+    }*/
 
+    std::vector<uint8_t>().swap(fullPayload);
+
+    return true;
    
 }
 
@@ -276,6 +372,13 @@ uint8_t privateKey[32] = {
     0xf0, 0x1c, 0xd1, 0x7e, 0xf9, 0x0a, 0x58, 0x1c,
     0x6c, 0x53, 0xc9, 0xfa, 0x91, 0xde, 0xae, 0xcd
 };
+
+/*uint8_t privateKey[32] = {
+    0x3a, 0x91, 0xf7, 0xd4, 0x6e, 0x88, 0x4c, 0x29,
+    0x53, 0xa6, 0x11, 0x5d, 0x9f, 0x72, 0x0b, 0xea,
+    0xde, 0x67, 0x3c, 0x81, 0x94, 0x2a, 0xe0, 0x6d,
+    0x01, 0xbf, 0xcc, 0x17, 0x48, 0x39, 0x99, 0xf0
+};*/
 uint8_t publicKey[32];
 // BLE Advertising Interval Constants (Bluetooth 5 Optimization)
 const uint16_t minInterval = 0x20; // 32 * 0.625ms = 20ms
@@ -360,23 +463,6 @@ std:: string det_orchid( unsigned int hda,  unsigned int raa,  unsigned int ipv6
     }
     formatted_orchid.pop_back();  // Remove the trailing ':'
 
-    //String test = binaryToHex(h_orchid);
-
-    Serial.println();
-    if(isParent){
-
-    Serial.println("Parent DET ORCHID:" +String(formatted_orchid.c_str()));
-     Serial.println("Parent Public Key:");
-    }else{
-    Serial.println("DET ORCHID:" +String(formatted_orchid.c_str()));
-    Serial.println("Child Public Key:");
-    }
-           for (int i = 0; i < 32; i++) {
-        Serial.printf("%02X ", publicKey[i]);
-    }
-  Serial.println();
-
-
     // Serial.println(h_orchid);
     // Serial.println(test);
     return h_orchid;
@@ -388,11 +474,13 @@ std:: string det_orchid( unsigned int hda,  unsigned int raa,  unsigned int ipv6
 
 
 std::vector<uint8_t> createDRIPLink(
+    
     const uint8_t *parentDET, size_t parentDETLen,
     const uint8_t *det, size_t detLen,
     const uint8_t *childPublicKey, size_t publicKeyLen) {
-
+       int64_t start_time = esp_timer_get_time();
       dripLink.clear();
+ 
    
         unsigned long startDRIPLink = millis(); // Start timing
     // Insert timestamps into the DRIP link in little-endian format
@@ -415,9 +503,10 @@ std::vector<uint8_t> createDRIPLink(
     dripLink.insert(dripLink.end(), parentSignature, parentSignature + 64);
     unsigned long endDRIPLink = millis(); // End timing
     dripLinkCreationTime = endDRIPLink - startDRIPLink; // Store the result
-
-      
-
+    int64_t end_time = esp_timer_get_time();
+  
+        
+    ESP_LOGI("PERF", "DRIP Link Function took: %lld microseconds", end_time - start_time);
     return dripLink;
 }
 
@@ -598,6 +687,7 @@ if (getFromCache("parent_sig", parentSignature, sizeof(parentSignature)) &&
 
       
    
+        int64_t start_time = esp_timer_get_time();
 
     unsigned long startServer = millis();
     
@@ -642,10 +732,14 @@ if (getFromCache("parent_sig", parentSignature, sizeof(parentSignature)) &&
             Serial.print("Failed to parse JSON response: ");
             Serial.println(error.c_str());
         } else {
+            int64_t end_time = esp_timer_get_time();
+            ESP_LOGI("PERF", "HDA SIGNATURE Retrieval Function took: %lld microseconds", end_time - start_time);
+
             // Extract the values
             if (doc[0]["message"] && doc[0]["hda_det"]) {
                  unsigned long endServer = millis();
                   HDATime = endServer - startServer;
+
                 String message = doc[0]["message"].as<String>();
                 String hdaDetHex = doc[0]["hda_det"].as<String>();
                 String hdaSignatureHex = doc[0]["signature"].as<String>();
@@ -837,7 +931,10 @@ Message pack (0xF){
 
 */
 
-std::vector<uint8_t> createWrapper(const uint8_t *det) {
+std::vector<uint8_t> createWrapper(const uint8_t *det, std::vector<uint8_t> encodedPayload) {
+ 
+    
+    int64_t start_time = esp_timer_get_time();
 
     unsigned long startWrapper = millis();
     wrapper.clear(); // Clear existing wrapper data
@@ -850,26 +947,50 @@ std::vector<uint8_t> createWrapper(const uint8_t *det) {
 
     wrapper.insert(wrapper.end(), (uint8_t*)&validNotAfter, (uint8_t*)&validNotAfter + 4);
 
-    // Add payload (F3411 messages, 25–100 bytes)
-    //wrapper.insert(wrapper.end(), payload.begin(), payload.end());
+    // Add payload encoded payload 
+
+    // Step 2: Append payload TEMPORARILY (only for signing)
+    size_t payloadStartIndex = wrapper.size();  // Mark where payload starts
+    wrapper.insert(wrapper.end(), encodedPayload.begin(), encodedPayload.end());
     // Add DET
     wrapper.insert(wrapper.end(), det, det + 16);
 
-    printVectorHex(wrapper, "WRAPPER BEFORE SIGNING : ");
-
-    // Sign the wrapper
+        //  Local fixed-size signature buffer
+    uint8_t l_signature[64];
    
-    Ed25519::sign(signature, privateKey, publicKey, wrapper.data(), wrapper.size());
+   Ed25519::sign(l_signature, privateKey, publicKey, wrapper.data(), wrapper.size());
+   // Step 6: Print wrapper (includes payload, no erasure yet)
+{
+    char hexBuf[2 * wrapper.size() + 1];
+    for (size_t i = 0; i < wrapper.size(); ++i) {
+        sprintf(&hexBuf[i * 2], "%02X", wrapper[i]);
+    }
+    hexBuf[2 * wrapper.size()] = '\0';
+
+    ESP_LOGI("WRAPPER", "Wrapper with payload before erase/signature append: %s", hexBuf);
+}
+
+
+    // Step 3: Remove payload 
+    wrapper.erase(wrapper.begin() + payloadStartIndex, wrapper.begin() + payloadStartIndex + encodedPayload.size());
 
 // test
-    Ed25519::sign(test_signature, privateKey, publicKey, test_message, sizeof(test_message));
-
+   // Ed25519::sign(test_signature, privateKey, publicKey, test_message, sizeof(test_message));
     // Add signature to the wrapper
-    wrapper.insert(wrapper.end(), signature, signature + 64);
+    wrapper.insert(wrapper.end(), l_signature, l_signature + 64);
       unsigned long endWrapper = millis();
       wrapperCreationTime = endWrapper - startWrapper;
-    
 
+
+      {
+    char hexBuf[2 * wrapper.size() + 1];
+    for (size_t i = 0; i < wrapper.size(); ++i) {
+        sprintf(&hexBuf[i * 2], "%02X", wrapper[i]);
+    }
+    hexBuf[2 * wrapper.size()] = '\0';
+
+    ESP_LOGI("WRAPPER", "Wrapper with payload after erase/signature append: %s", hexBuf);
+}
     if(loops == -1){
       sendToServer(true);
       
@@ -878,39 +999,130 @@ std::vector<uint8_t> createWrapper(const uint8_t *det) {
     }
 
 
+
+
+
   
+
+    int64_t end_time = esp_timer_get_time();
+
       
-  
-      
- 
+    ESP_LOGI("PERF", "Wrapper Function took: %lld microseconds", end_time - start_time);
+
 
 
     return wrapper;
 }
- std::vector<uint8_t>  defineWrapper (){
+
+void print_cpu_usage() {
+    TaskStatus_t *pxTaskStatusArray;
+    volatile UBaseType_t uxArraySize, x;
+    uint32_t ulTotalRunTime;
+    
+    // Get number of tasks
+    uxArraySize = uxTaskGetNumberOfTasks();
+    
+    // Allocate array to hold task info
+    pxTaskStatusArray = (TaskStatus_t *)pvPortMalloc(uxArraySize * sizeof(TaskStatus_t));
+    
+    if(pxTaskStatusArray != NULL) {
+        // Get task information
+        uxArraySize = uxTaskGetSystemState(pxTaskStatusArray, uxArraySize, &ulTotalRunTime);
+        
+        // For each task, print CPU usage
+        for(x = 0; x < uxArraySize; x++) {
+            ESP_LOGI("CPU", "Task: %s, CPU: %f%%", 
+                    pxTaskStatusArray[x].pcTaskName,
+                    pxTaskStatusArray[x].ulRunTimeCounter * 100.0 / ulTotalRunTime);
+        }
+        
+        vPortFree(pxTaskStatusArray);
+    }
+}
+
+
+
+ // PERFORMANCE TEST FOR DET 
+
+ bool IRAM_ATTR  create_det(){
+    // Setup the constat values. :
+    det.prefix = 0x2001003; 
+    det.raa = 16376; 
+    det.hda = 1025;
+    det.suiteID = 5;
+    childDET =  det_orchid (det.hda, det.raa, det.prefix, det.suiteID, publicKey,false);
+
+    return true;
+
+ }
+
+ void measure_det_time() {
+    // Start timer
+    int64_t start_time = esp_timer_get_time();
+
+    // Call your DET function
+    create_det(); // Replace with your function
+
+    // End timer
+    int64_t end_time = esp_timer_get_time();
+    int64_t elapsed_time = end_time - start_time;
+
+    ESP_LOGI(TAG, "DET generation took %lld microseconds (%.3f milliseconds)\n ", elapsed_time, (double)elapsed_time / 1000);
+}
+
+
+ std::vector<uint8_t>  defineWrapper (std::vector<uint8_t> encodedPayload){
+
+     // Get free heap before operation
+     size_t free_heap_before = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+
+     //CPU
+     int64_t start_time = esp_timer_get_time();  // Returns µs since boot
+
+    
         unsigned long startDET = millis();
-       childDET =  det_orchid (det.hda, det.raa, det.prefix, det.suiteID, publicKey,false);
+        int64_t det_start_time = esp_timer_get_time();  // microseconds
+        childDET =  det_orchid (det.hda, det.raa, det.prefix, det.suiteID, publicKey,false);
         // Convert std::string DETs to uint8_t arrays
         unsigned long endDET = millis();
+        int64_t det_end_time = esp_timer_get_time();  // microseconds
+        int64_t duration = esp_timer_get_time() - start_time;
+      
         detGenerationTime = endDET - startDET;
         uint8_t childDETArray[16];
         hexStringToByteArray(childDET, childDETArray, sizeof(childDETArray));
        //std::vector<uint8_t> payload = createPayload();
          // Create Wrapper
-        std::vector<uint8_t> wrapper = createWrapper( childDETArray);
+        std::vector<uint8_t> wrapper = createWrapper( childDETArray, encodedPayload);
+
+        // Get free heap after operation
+   size_t free_heap_after = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    
+   ESP_LOGI("MEMORY", "RAM used by Wrapper Creation: %zu bytes", 
+    free_heap_before - free_heap_after);
+
+    int64_t delta_us = esp_timer_get_time() - start_time;
+
+    
+    ESP_LOGI("PERF", "Execution time: %lld microseconds", (delta_us));
+    print_cpu_usage();
         return wrapper; 
         //
         
 
 }
-std::vector<uint8_t> initWrapper(){
 
+std::vector<uint8_t> initWrapper(std::vector<uint8_t> encodedPayload){
+
+   
     // Setup the constat values. :
     det.prefix = 0x2001003; 
     det.raa = 16376; 
-    det.hda = 1025;
+    //det.hda = 1025;
+    det.hda = 1026;
     det.suiteID = 5; 
-   std::vector<uint8_t> wrapper =  defineWrapper();
+   std::vector<uint8_t> wrapper =  defineWrapper(encodedPayload);
+   
    return wrapper;
 }
 
@@ -923,15 +1135,17 @@ ODID_MessagePack_data messagePack;
 
 
 
-std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wrapper) {
+std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wrapper, bool isWrapper) {
     size_t totalDataSize = wrapper.size();  // 88 bytes
-    size_t firstPageSize = 17;              // First page has 17 bytes
+    size_t firstPageSize = 16;              // First page has 17 bytes minues one for SAM TYPE
     size_t remainingPageSize = 23;          // Subsequent pages take 23 bytes each
 
     // Calculate the total number of required pages
-    size_t totalPages = 1 + (totalDataSize - firstPageSize + remainingPageSize - 1) / remainingPageSize;
-
+    size_t totalPages = 1 + (totalDataSize - firstPageSize  + remainingPageSize - 1) / remainingPageSize;
+    ESP_LOGI(LOG_TAG, "Total Pages: %zu bytes\n", totalPages);
     std::vector<ODID_Auth_data> authMessages(totalPages);
+
+
 
     Serial.printf("Total Auth Pages Before Encoding: %d\n", totalPages); // Debugging
 
@@ -947,23 +1161,44 @@ std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wr
     authMessages[0].LastPageIndex = totalPages - 1;
     authMessages[0].Length = totalDataSize;
     authMessages[0].Timestamp = (uint32_t)time(NULL);
+    authMessages[0].AuthData[0] = isWrapper? 2 : 1;  
+    memcpy(authMessages[0].AuthData + 1 , wrapper.data(), firstPageSize );
 
-    memcpy(authMessages[0].AuthData, wrapper.data(), firstPageSize);
+    
+
 
     // --- Remaining Pages ---
     for (size_t i = 1; i < totalPages; i++) {
         memset(&authMessages[i], 0, sizeof(ODID_Auth_data));
         authMessages[i].AuthType = ODID_AUTH_SPECIFIC_AUTHENTICATION;
         authMessages[i].DataPage = i;
+
+          ESP_LOGI(LOG_TAG, "Enterd Page: %zu bytes\n", i);
         //authMessages[i].LastPageIndex = totalPages - 1;
         //authMessages[i].Length = totalDataSize;
         //authMessages[i].Timestamp = authMessages[0].Timestamp;
+        
 
         size_t offset = firstPageSize + (i - 1) * remainingPageSize;
         size_t bytesToCopy = std::min(remainingPageSize, totalDataSize - offset);
+        ESP_LOGI(LOG_TAG, "Offset %zu bytes\n", offset);
+         ESP_LOGI(LOG_TAG, "bytesToCopy %zu bytes\n", bytesToCopy);
 
         memcpy(authMessages[i].AuthData, wrapper.data() + offset, bytesToCopy);
-    }
+
+          // Log what was written to AuthData buffer
+        std::string hexWritten;
+        for (size_t j = 0; j < 23; j++) {  // Full auth page buffer
+            char buf[4];
+            sprintf(buf, "%02X ", authMessages[i].AuthData[j]);
+            hexWritten += buf;
+        }
+        ESP_LOGI(LOG_TAG, "AuthData buffer: %s", hexWritten.c_str());
+
+                
+            }
+
+
 
     return authMessages;
 }
@@ -1019,24 +1254,22 @@ std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wr
 
 
 
-    std::vector<uint8_t> constructASTMMessages( bool isWrapper) {
-  
-    std::vector<uint8_t> wrapper = initWrapper();
-    if (wrapper.size() != 88) {
-        Serial.println("Error: Wrapper size is not 88 bytes!");
-        return {};
-    }
+    void constructASTMMessages( bool isWrapper) {  
+        
+    
+        
+    int64_t start_time = esp_timer_get_time();
 
+    delay (10000);
+      
     ODID_MessagePack_encoded messagePack;
     memset(&messagePack, 0, sizeof(messagePack));  // Clear structure
     messagePack.ProtoVersion = 2;  // Set Protocol Version 2
     messagePack.MessageType = ODID_MESSAGETYPE_PACKED; // Ensure this is the correct packed message type
-  
-
     if(isWrapper){
-    messagePack.MsgPackSize = 8;// Total of 8 messages (Basic ID, Location, Authentication, System)
+    messagePack.MsgPackSize = 7;// Total of 8 messages (Basic ID, Location, Authentication, System)
 }else {
-    messagePack.MsgPackSize = 8;
+    messagePack.MsgPackSize = 9;
 }
    messagePack.SingleMessageSize = ODID_MESSAGE_SIZE;  // 25 bytes (0x19 in hex)
 
@@ -1046,35 +1279,104 @@ std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wr
     basicID.IDType = ODID_IDTYPE_SPECIFIC_SESSION_ID;  // Type 4 for Serial Number (DET)
     strcpy(basicID.UASID, childDET.c_str());   // DET as Serial Number
 
-    // --- Location Message ---
     ODID_Location_data location;
-    memset(&location, 0, sizeof(location));
-    location.Latitude = 42.2917000;  // Example Lat
-    location.Longitude = -85.587200; // Example Lon
-    location.AltitudeBaro = 100;      // Example Altitude
-    location.TimeStamp = (uint32_t)time(NULL);
+    memset(&location, 0, sizeof(location));  // Clear all
+    
+    if (has_gps_fix) {
+        location.Latitude = current_lat;            // Must be double
+        location.Longitude = current_lon;           // Must be double
+        location.AltitudeBaro = (float)current_alt; // Must be float
+        location.TimeStamp = (float)(time(NULL) % 3600); // Seconds after full hour
+    } else {
+        ESP_LOGW(TAG, "No GPS fix yet. Using default values.");
+        location.Latitude = 0.0;
+        location.Longitude = 0.0;
+        location.AltitudeBaro = -1000.0f;
+        location.TimeStamp = 0.0f;
+    }
+    
+    // Mandatory: fill all remaining fields with known "invalid" or default values
+    location.Direction = 361.0f;           // Invalid direction
+    location.SpeedHorizontal = 255.0f;     // Invalid speed
+    location.SpeedVertical = 63.0f;        // Invalid vertical speed
+    location.AltitudeGeo = -1000.0f;
+    location.Height = -1000.0f;
+    location.HeightType = ODID_HEIGHT_REF_OVER_TAKEOFF;
+    
+    location.HorizAccuracy = ODID_HOR_ACC_UNKNOWN;
+    location.VertAccuracy = ODID_VER_ACC_UNKNOWN;
+    location.BaroAccuracy = ODID_VER_ACC_UNKNOWN;
+    location.SpeedAccuracy = ODID_SPEED_ACC_UNKNOWN;
+    location.TSAccuracy = ODID_TIME_ACC_UNKNOWN;
 
-    //-- Authentication Message (Wrapper split into 5 pages) ---
-    std::vector<ODID_Auth_data> authMessages ;
-    if(isWrapper == true){
-     authMessages = constructAuthMessages(wrapper);
-}else {
-     authMessages = constructAuthMessages(dripLink);
-     ESP_LOGI(LOG_TAG, "Size of drip: %zu bytes\n", dripLink.size());
-
-}
     // --- System Message ---
-    ODID_System_data system;
+    
+    if(isWrapper){
+   /* ODID_System_data system;
+    
     memset(&system, 0, sizeof(system));
     system.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_FIXED;
     system.OperatorLatitude = location.Latitude;
     system.OperatorLongitude = location.Longitude;
     system.Timestamp = (uint32_t)time(NULL);
+    encodeSystemMessage(&messagePack.Messages[7].system, &system);*/
+
+}
+    
     
 
     // --- Encoding the Messages ---
     encodeBasicIDMessage(&messagePack.Messages[0].basicId, &basicID);
     encodeLocationMessage(&messagePack.Messages[1].location, &location);
+    
+
+    std::vector<uint8_t> encodedPayload;
+    encodedPayload.insert(encodedPayload.end(),
+    messagePack.Messages[0].rawData,
+    messagePack.Messages[0].rawData + ODID_MESSAGE_SIZE);
+    encodedPayload.insert(encodedPayload.end(),
+    messagePack.Messages[1].rawData,
+    messagePack.Messages[1].rawData + ODID_MESSAGE_SIZE);
+ 
+    if(isWrapper){
+   
+    }else{
+     //encodeSystemMessage(&messagePack.Messages[9].system, &system);
+    }
+
+    //int systemIndex = isWrapper ? 7 : 9;
+    /*if(isWrapper){
+    encodedPayload.insert(encodedPayload.end(),
+    messagePack.Messages[systemIndex].rawData,
+    messagePack.Messages[systemIndex].rawData + ODID_MESSAGE_SIZE);}*/
+
+
+
+    // Construct Evidence Field for Singing per 4.3.2 RFC 9575
+    std::vector<uint8_t> wrapper = initWrapper(encodedPayload);
+    if (wrapper.size() != 88) {
+        Serial.println("Error: Wrapper size is not 88 bytes!");
+        return;
+    }
+
+
+      //-- Authentication Message (Wrapper split into 5 pages) ---
+      std::vector<ODID_Auth_data> authMessages ;
+      if(isWrapper == true){
+       authMessages = constructAuthMessages(wrapper, true);
+  }else {
+       authMessages = constructAuthMessages(dripLink, false);
+       ESP_LOGI(LOG_TAG, "Size of drip: %zu bytes\n", dripLink.size());
+       std::string hexDrip;
+        for (uint8_t byte : dripLink) {
+            char buf[4];
+            sprintf(buf, "%02X ", byte);
+            hexDrip += buf;
+        }
+        ESP_LOGI(LOG_TAG, "DRIP Link Data: %s", hexDrip.c_str());
+  
+  }
+    
 
     // Add the 5/7 authentication messages
     int messages = 0; 
@@ -1083,10 +1385,22 @@ std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wr
         messages = i;
     }
 
-    encodeSystemMessage(&messagePack.Messages[messages+3].system, &system);
-
+    
     // Convert to byte array
+    // Log full hex of each page (0 to 6)
+for (int i = 0; i < 7; i++) {
+    const uint8_t *auth_bytes = (const uint8_t *)&messagePack.Messages[i].auth;
+    size_t len = sizeof(messagePack.Messages[i].auth);
 
+    char hexBuf[2 * len + 1]; // 2 hex digits per byte + null terminator
+    for (size_t j = 0; j < len; j++) {
+        sprintf(&hexBuf[j * 2], "%02X", auth_bytes[j]);
+    }
+    hexBuf[2 * len] = '\0';
+
+    ESP_LOGI(LOG_TAG, "Encoded Auth Page %d: %s", i, hexBuf);
+}
+ /*
     ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data: %zu bytes\n", sizeof(messagePack.Messages[0].auth));
     ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data Page 1: %zu bytes\n", sizeof(messagePack.Messages[1].auth));
     ESP_LOGI(LOG_TAG, "Size of ODID_Auth_data Page2 : %zu bytes\n", sizeof(messagePack.Messages[2].auth));
@@ -1099,14 +1413,37 @@ std::vector<ODID_Auth_data> constructAuthMessages(const std::vector<uint8_t>& wr
     ESP_LOGI(LOG_TAG, "Size of location: %zu bytes\n", sizeof(messagePack.Messages[0].location));
     ESP_LOGI(LOG_TAG, "Size of system_data: %zu bytes\n", sizeof(messagePack.Messages[0].system));
     ESP_LOGI(LOG_TAG, "Size of basic_data: %zu bytes\n", sizeof(messagePack.Messages[0].basicId));
-    ESP_LOGI(LOG_TAG, "Size of ASTM: %zu bytes\n", sizeof(messagePack));
+    ESP_LOGI(LOG_TAG, "Size of ASTM: %zu bytes\n", sizeof(messagePack));*/
     
     astmPayload.clear();   
-    astmPayload.insert(astmPayload.end(), (uint8_t*)&messagePack, (uint8_t*)&messagePack + sizeof(messagePack));
+
+
+    // THE ISSUE 
+
+
+    if(isWrapper){
+        astmPayload.insert(astmPayload.end(), (uint8_t*)&messagePack, (uint8_t*)&messagePack + sizeof(messagePack));
+    }else{
+
+        astmPayload.insert(astmPayload.end(), (uint8_t*)&messagePack, (uint8_t*)&messagePack + 231);
+    }
+    
+
+
     ESP_LOGI(LOG_TAG, "Size of ASTM: %zu bytes\n", astmPayload.size());
 
-    updateAdvDataWithWrapper(astmPayload, astmPayload.size(), false);
-    return astmPayload;
+    if(updateAdvDataWithWrapper(astmPayload, astmPayload.size(), false)){
+        std::vector<uint8_t>().swap(astmPayload);
+
+     int64_t end_time = esp_timer_get_time();
+
+
+    ESP_LOGI("PERF", "Transmittion Time: %lld microseconds", end_time - start_time);
+
+    }
+    
+
+
 }
 
 
@@ -1506,16 +1843,49 @@ void generateRandomData(uint8_t *data, size_t length) {
     }
 }
 
-// Main Application Entry Point
-extern  "C" void app_main(void) {
-    
-    initArduino();
-    NVSInit();
-    clear_nvs();
-    WiFiInit(); 
-    InitTime();
-    generateKeys();
-    //initWrapper();
+void print_system_memory_usage() {
+    multi_heap_info_t info;
+    heap_caps_get_info(&info, MALLOC_CAP_DEFAULT);
+
+    ESP_LOGI("MEMORY", "Total free bytes: %zu", info.total_free_bytes);
+ESP_LOGI("MEMORY", "Total allocated bytes: %zu", info.total_allocated_bytes);
+ESP_LOGI("MEMORY", "Largest free block: %zu", info.largest_free_block);
+
+    ESP_LOGI("MEMORY", "Largest free block: %zu bytes", info.largest_free_block);
+}
+
+void drip_testing_task(void *pvParameters) {
+
+    while (true) {
+        if (linkRec == true){
+            // sendDripLink();
+             //updateAdvDataWithWrapper(dripLink, dripLink.size(), true);
+             size_t heap_before = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+
+             ESP_LOGI("MEMORY", "Free heap: %" PRIu32 " bytes", esp_get_free_heap_size());
+            ESP_LOGI("MEMORY", "Minimum free heap ever: %" PRIu32 " bytes", esp_get_minimum_free_heap_size());
+
+            size_t heap_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+             constructASTMMessages(false);
+             ESP_LOGI("MEMORY", "Free heap after constructed: %" PRIu32 " bytes", esp_get_free_heap_size());
+                size_t ram_after = esp_get_free_heap_size();
+                ESP_LOGI("MEMORY", "RAM used by function: %d bytes", (int)(heap_before - heap_after));
+
+           }
+       
+        vTaskDelay(pdMS_TO_TICKS(3000));  // 3 seconds
+
+    }
+
+}
+
+int wrapperCounter = 0;
+
+void system_main_task(void *pvParameters) {
+    // Place your entire app_main() code here (WiFiInit, InitTime, etc...)
+    // EXCEPT the xTaskCreate and this function call itself.
+
     constructASTMMessages(true);
     
 // Check for updates
@@ -1526,6 +1896,7 @@ extern  "C" void app_main(void) {
     ESP_LOGI(LOG_TAG, "Creating Wrapper");
 
     }
+
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
@@ -1541,9 +1912,12 @@ extern  "C" void app_main(void) {
     esp_ble_gap_ext_adv_set_params(0, &ext_adv_params_2M);
 
      while (1) {
+
         ESP_LOGI(LOG_TAG, "Main loop running...");
-  unsigned long currentTime = millis();
-    if (currentTime - lastTransmissionTime >= transmissionInterval) {
+        unsigned long currentTime = millis();
+        delay (10000);
+        if (currentTime - lastTransmissionTime >= transmissionInterval) {
+        
         lastTransmissionTime = currentTime;
           ArduinoOTA.handle();
   // Convert std::string to Arduino String and print it
@@ -1591,6 +1965,8 @@ for (int i = 0; i < 64; i++) {
 }
 Serial.println();
 Serial.println("Child DET: " + String(childDET.c_str()));
+ESP_LOGI(LOG_TAG, "Child DET: %s", childDET.c_str());
+
 Serial.println("HDA DET: " + String(ParentDET.c_str()));
 
 Serial.printf("Wrapper Length: %d\n", wrapper.size());
@@ -1611,13 +1987,18 @@ if (valid) {
  // delay(500);
     //initWrapper();
     //generateF3411Message();
+    if (wrapperCounter % 2 == 0){
     constructASTMMessages(true);
+    wrapperCounter++;
+    }
  
     sendWrapperAndPublicKey();
-    if (linkRec == true){
+    if (linkRec == true && wrapperCounter % 2 != 0){
      // sendDripLink();
       //updateAdvDataWithWrapper(dripLink, dripLink.size(), true);
+    
       constructASTMMessages(false);
+      wrapperCounter++;
     }
 
     // Update and broadcast the wrapper
@@ -1638,3 +2019,39 @@ if (valid) {
     }
 }
 
+void det_task(void *pvParameter) {
+    while (1) {
+        measure_det_time(); // Your function
+
+        vTaskDelay(1); // Yield to other tasks
+    }
+}
+
+// Main Application Entry Point
+extern  "C" void app_main(void) {
+    
+    initArduino();
+    NVSInit();
+    clear_nvs();
+    WiFiInit(); 
+    InitTime();
+    generateKeys();
+    //initWrapper();
+    init_uart();
+
+    //xTaskCreate(det_task, "DET Task", 4096, NULL, 5, NULL);
+
+
+     // Start system task (monitoring, telemetry, etc.)
+    xTaskCreate(system_main_task, "system_main_task", 8192, NULL, 5, NULL);
+     //TaskCreate(drip_testing_task, "drip_testing_task", 8192, NULL, 5, NULL);
+
+     // Start MAVLink task
+     xTaskCreate(mavlink_task, "mavlink_task", 4096, NULL, 10, NULL);
+    
+    // Create the monitoring task (LOWEST PRIORITY - should be last)
+    //xTaskCreate(monitor_task, "monitor_task", 4096, NULL, 1, &monitor_task_handle); // Priority 
+
+
+    
+}
